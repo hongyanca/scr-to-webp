@@ -1,0 +1,7 @@
+[project]
+name = "sc-to-webp"
+version = "0.1.0"
+description = "Covert screenshots in PNG to WebP format using LLM for naming"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["requests>=2.32.3"]
