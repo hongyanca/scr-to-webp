@@ -5,10 +5,11 @@ import base64
 import os
 import glob
 import subprocess
+import sys
 # from pathlib import Path
 
-MODEL_NAME = "google/gemma-3-27b-it:free"
-# MODEL_NAME = "qwen/qwen3-30b-a3b:free"
+# MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.1-flash-lite-preview"
 PROMPT_GEN_FILENAME = """
 You are an AI tasked with generating a concise, meaningful filename for a screenshot. Analyze the content of the screenshot and create a filename that:
 - Reflects the main subject or purpose of the screenshot.
@@ -26,13 +27,37 @@ Based on the provided screenshot, generate a single filename that meets these cr
 """
 SCR_PATH = "~/Downloads/"
 CWEBP_CLI_TEMPLATE = "cwebp -q 80 {input} -o {output}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
 
 
-def get_scr_img_path(search_path):
-    """Return absolute path of the newest .png file starts with 'SCR-' in search_path"""
-    expanded_path = os.path.expanduser(search_path)
-    pattern = os.path.join(expanded_path, "SCR-*.png")
-    files = glob.glob(pattern)
+def display_path(path):
+    """Render paths under the home directory using ~ for display."""
+    home_dir = os.path.expanduser("~")
+    abs_path = os.path.abspath(path)
+    if abs_path == home_dir:
+        return "~"
+    if abs_path.startswith(home_dir + os.sep):
+        return abs_path.replace(home_dir, "~", 1)
+    return abs_path
+
+
+def get_scr_img_path(search_path=None, explicit_path=None):
+    """Return absolute path for an explicit file or the newest SCR-*.png from known locations."""
+    if explicit_path:
+        candidate = os.path.abspath(os.path.expanduser(explicit_path))
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+
+    search_paths = []
+    if search_path:
+        search_paths.append(os.path.expanduser(search_path))
+    search_paths.append(os.getcwd())
+
+    files = []
+    for base_path in search_paths:
+        pattern = os.path.join(base_path, "SCR-*.png")
+        files.extend(glob.glob(pattern))
 
     if not files:
         return None
@@ -47,49 +72,66 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
-def get_screenshot_data_url(search_path):
-    """Find newest SCR- screenshot and return as data URL, or None if not found"""
-    image_path = get_scr_img_path(search_path)
+def get_screenshot_inline_part(search_path=None, explicit_path=None):
+    """Find screenshot and return a Gemini inline_data part, or None if not found."""
+    image_path = get_scr_img_path(search_path=search_path, explicit_path=explicit_path)
     if image_path is not None:
         base64_image = encode_image_to_base64(image_path)
-        return f"data:image/png;base64,{base64_image}"
+        return {"inline_data": {"mime_type": "image/png", "data": base64_image}}
     return None
 
 
-def llm_gen_filename(search_path):
+def llm_gen_filename(search_path=None, explicit_path=None):
     """Generate filename suggestions using LLM for newest screenshot in search_path"""
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}", "Content-Type": "application/json"}
-
-    # Get screenshot data URL
-    data_url = get_screenshot_data_url(search_path)
-
-    if data_url is None:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("LLM request failed: GEMINI_API_KEY is not set")
         return None
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": PROMPT_GEN_FILENAME},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }
-    ]
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
-    payload = {"model": MODEL_NAME, "messages": messages}
+    image_part = get_screenshot_inline_part(search_path=search_path, explicit_path=explicit_path)
 
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json()
+    if image_part is None:
+        return None
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": PROMPT_GEN_FILENAME},
+                    image_part,
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(GEMINI_API_URL, headers=headers, json=payload, timeout=30)
+        if not response.ok:
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = {"raw_body": response.text}
+
+            print(f"LLM request failed: HTTP {response.status_code}")
+            print(json.dumps(error_payload, indent=2))
+            return None
+
+        return response.json()
+    except requests.RequestException as e:
+        print(f"LLM request failed: {e}")
+        return None
 
 
 def extract_filenames(llm_response):
     """Extract filenames from LLM response content and return as dict"""
-    if not llm_response or "choices" not in llm_response:
+    if not llm_response or "candidates" not in llm_response:
         return None
 
     try:
-        content = llm_response["choices"][0]["message"]["content"]
+        parts = llm_response["candidates"][0]["content"]["parts"]
+        content = "".join(part.get("text", "") for part in parts)
         # Remove markdown code block markers if present
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
@@ -141,6 +183,12 @@ def select_filename(filenames_dict):
         return filenames[0]
 
 
+def default_filename_for_image(image_path):
+    """Fallback filename when LLM suggestions are unavailable."""
+    stem = os.path.splitext(os.path.basename(image_path))[0].lower()
+    return stem.replace(" ", "-")
+
+
 def compress_image_webp(image_path, selected_filename):
     """Convert PNG to WebP using cwebp CLI tool"""
     if not image_path or not selected_filename:
@@ -180,12 +228,21 @@ def compress_image_webp(image_path, selected_filename):
 
 
 def main():
+    explicit_path = sys.argv[1] if len(sys.argv) > 1 else None
     print(f"LLM Model: {MODEL_NAME}")
-    response = llm_gen_filename(SCR_PATH)
+    image_path = get_scr_img_path(search_path=SCR_PATH, explicit_path=explicit_path)
+    if image_path is None:
+        print("No input image found. Pass a file path or place an SCR-*.png in the current directory or ~/Downloads.")
+        return
+
+    print(f"Using image: {display_path(image_path)}")
+    response = llm_gen_filename(search_path=SCR_PATH, explicit_path=explicit_path)
     filenames = extract_filenames(response)
     selected_filename = select_filename(filenames)
+    if selected_filename is None:
+        selected_filename = default_filename_for_image(image_path)
+        print(f"Falling back to filename: {selected_filename}")
     print(f"Selected filename: {selected_filename}")
-    image_path = get_scr_img_path(SCR_PATH)
     if image_path and selected_filename:
         compress_image_webp(image_path, selected_filename)
 
