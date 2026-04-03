@@ -8,8 +8,9 @@ import subprocess
 import sys
 # from pathlib import Path
 
-# MODEL_NAME = "gemini-2.5-flash"
 MODEL_NAME = "gemini-3.1-flash-lite-preview"
+# MODEL_NAME = "gemma-4-26b-a4b-it"
+
 PROMPT_GEN_FILENAME = """
 You are an AI tasked with generating a concise, meaningful filename for a screenshot. Analyze the content of the screenshot and create a filename that:
 - Reflects the main subject or purpose of the screenshot.
