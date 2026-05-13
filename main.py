@@ -8,7 +8,7 @@ import subprocess
 import sys
 # from pathlib import Path
 
-MODEL_NAME = "gemini-3.1-flash-lite-preview"
+MODEL_NAME = "gemini-3.1-flash-lite"
 # MODEL_NAME = "gemma-4-26b-a4b-it"
 
 PROMPT_GEN_FILENAME = """
